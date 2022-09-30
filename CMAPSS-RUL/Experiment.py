@@ -1,0 +1,400 @@
+import sys
+sys.path.append("..")
+import os 
+import numpy as np
+import torch
+from torch import optim
+import torch.nn as nn
+import scipy.stats as stats
+import math
+from CMAPSS_load import CMAPSSData,cmapss_data_train_vali_loader
+from model import TStransformer
+from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
+from time import time
+from Loss import HTSLoss
+from sklearn.metrics import mean_squared_error
+
+class Weighted_MSE_Loss(nn.Module):    
+    def __init__(self, seq_length=40, sigma_faktor=10, device = "cuda"):
+        super(Weighted_MSE_Loss, self).__init__()
+        self.seq_length = seq_length
+        self.sigma      = seq_length/sigma_faktor
+        
+        x = np.linspace(1, seq_length, seq_length)
+        mu = seq_length
+        y = stats.norm.pdf(x, mu, self.sigma)
+        y = y + np.max(y)/15
+        y = y/np.sum(y)*seq_length
+        plt.plot(x, y)
+        plt.show()
+        with torch.no_grad():
+            self.weights = torch.Tensor(y).double().to(device)  
+        
+    def forward(self, pred, target):
+        se  = (pred-target)**2
+        out = se * self.weights.expand_as(target)
+        loss = out.mean() 
+        return loss
+
+
+
+class EarlyStopping:
+    """Early stops the training if validation loss doesn't improve after a given patience."""
+    def __init__(self, patience=7, verbose=False, delta=0):
+        """
+        Args:
+            patience (int): How long to wait after last time validation loss improved.
+                            Default: 7
+            verbose (bool): If True, prints a message for each validation loss improvement. 
+                            Default: False
+            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
+                            Default: 0
+            path (str): Path for the checkpoint to be saved to.
+                            Default: 'checkpoint.pt'
+  
+        """
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_loss_min = np.Inf
+        self.delta = delta
+
+    def __call__(self, val_loss, model, path):
+
+        score = -val_loss
+
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(val_loss, model, path)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            print("new best score!!!!")
+            self.best_score = score
+            self.save_checkpoint(val_loss, model,path)
+            self.counter = 0
+
+    def save_checkpoint(self, val_loss, model, path):
+        '''Saves model when validation loss decrease.'''
+        if self.verbose:
+            print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
+        torch.save(model.state_dict(), path+'/'+'{}_checkpoint.pth'.format(str(val_loss)))
+        self.val_loss_min = val_loss
+        
+
+
+class adjust_learning_rate_class:
+    def __init__(self, args, verbose):
+        self.patience = args.learning_rate_patience
+        self.factor   = args.learning_rate_factor
+        self.learning_rate = args.learning_rate
+        self.args = args
+        self.verbose = verbose
+        self.val_loss_min = np.Inf
+        self.counter = 0
+        self.best_score = None
+    def __call__(self, optimizer, val_loss):
+        # val_loss 是正值，越小越好
+        # 但是这里加了负值，score愈大越好
+        score = -val_loss
+
+        if self.best_score is None:
+            self.best_score = score
+            self.counter += 1
+        elif score <= self.best_score :
+            self.counter += 1
+            if self.verbose:
+                print(f'Learning rate adjusting counter: {self.counter} out of {self.patience}')
+        else:
+            if self.verbose:
+                print("new best score!!!!")
+            self.best_score = score
+            self.counter = 0
+            
+        if self.counter == self.patience:
+            self.learning_rate = self.learning_rate * self.factor
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = self.learning_rate
+                if self.verbose:
+                    print('Updating learning rate to {}'.format(self.learning_rate))
+            self.counter = 0
+
+
+class Exp_TStransformer(object):
+    def __init__(self, args):
+        self.args = args
+        # args.use_gpu
+        # args.gpu
+
+        self.device = self._acquire_device()
+        
+        self.train_data, self.train_loader, self.vali_data , self.vali_loader = self._get_data(flag = 'train')
+        self.input_dimension = self.train_data.data_channel           
+        self.test_data, self.test_loader = self._get_data(flag = 'test')        
+
+        self.model = self._build_model().to(self.device)
+        
+        self.optimizer_dict = {"Adam":optim.Adam}
+        self.criterion_dict = {"MSE":nn.MSELoss,"CrossEntropy":nn.CrossEntropyLoss,"WeightMSE":Weighted_MSE_Loss}
+
+    def _acquire_device(self):
+        if self.args.use_gpu:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.args.gpu)
+            device = torch.device('cuda:0')
+            print('Use GPU: cuda:0')
+        else:
+            device = torch.device('cpu')
+            print('Use CPU')
+        return device
+    
+    
+    def _build_model(self):
+        if not self.args.late:
+            print("build not late")
+            model = TStransformer(enc_in                = self.input_dimension,
+                                  input_length          = self.args.sequence_length,
+                                  d_model               = self.args.d_model,
+                                  attention_layer_types = self.args.attention_layer_types,
+                                  embedd_kernel_size    = self.args.embedd_kernel_size,
+                                  forward_kernel_size   = self.args.forward_kernel_size,
+                                  value_kernel_size     = self.args.value_kernel_size,
+                                  causal_kernel_size    = self.args.causal_kernel_size,
+                                  d_ff                  = self.args.d_ff,
+                                  n_heads               = self.args.n_heads,
+                                  e_layers              = self.args.e_layers,
+                                  dropout               = self.args.dropout,
+                                  norm                  = self.args.norm,
+                                  activation            = self.args.activation,
+                                  output_attention      = self.args.output_attention,
+                                  predictor_type        = self.args.predictor_type)
+
+            print("Parameter :", np.sum([para.numel() for para in model.parameters()]))
+        
+        else:
+            raise NotImplementedError("late transformer") 
+
+        return model.double()
+    
+    
+    def _select_optimizer(self):
+        # 这两个在train里面被调用
+        if self.args.optimizer not in self.optimizer_dict.keys():
+            raise NotImplementedError
+            
+        model_optim = self.optimizer_dict[self.args.optimizer](self.model.parameters(), 
+                                                               lr=self.args.learning_rate)
+        return model_optim
+    
+    
+    def _select_criterion(self):
+        # 这两个在train里面被调用
+        if self.args.criterion not in self.criterion_dict.keys():
+            raise NotImplementedError
+            
+        criterion = self.criterion_dict[self.args.criterion]()
+        return criterion
+		
+    def _get_data(self, flag="train"):
+        args = self.args
+        if flag == 'train':
+            
+            X_train, y_train, X_vali, y_vali = cmapss_data_train_vali_loader(data_path         = args.data_path, 
+                                                                             Data_id           = args.Data_id,
+                                                                             flag              = "train",
+                                                                             sequence_length   = args.sequence_length,
+                                                                             MAXLIFE           = args.MAXLIFE, 
+                                                                             difference        = args.difference, 
+                                                                             normalization     = args.normalization,
+                                                                             validation        = args.validation)
+            train_data_set = CMAPSSData(X_train, y_train)
+            vali_data_set  = CMAPSSData(X_vali, y_vali)
+			
+            train_data_loader = DataLoader(train_data_set, 
+                                           batch_size  = args.batch_size,
+                                           shuffle     = True,
+                                           num_workers = 0,
+                                           drop_last   = False)
+            vali_data_loader  = DataLoader(vali_data_set, 
+                                           batch_size  = args.batch_size,
+                                           shuffle     = False,
+                                           num_workers = 0,
+                                           drop_last   = False)
+            return train_data_set, train_data_loader, vali_data_set,vali_data_loader
+        else:
+            X_test, y_test = cmapss_data_train_vali_loader(data_path         = args.data_path, 
+                                                           Data_id           = args.Data_id,
+                                                           flag              = "test",
+                                                           sequence_length   = args.sequence_length,
+                                                           MAXLIFE           = args.MAXLIFE, 
+                                                           difference        = args.difference, 
+                                                           normalization     = args.normalization,
+                                                           validation        = args.validation)
+            test_data_set  = CMAPSSData(X_test, y_test)
+            test_data_loader  = DataLoader(test_data_set, 
+                                           batch_size  = args.batch_size,
+                                           shuffle     = False,
+                                           num_workers = 0,
+                                           drop_last   = False)
+            return test_data_set, test_data_loader
+    
+    def train(self, save_path):
+
+        # 中间过程存储地址
+        path = './logs/'+save_path
+        if not os.path.exists(path):
+            os.makedirs(path)
+        
+        # 根据batch ssize 看一个epoch里面有多少训练步骤 以及validation的步骤
+        train_steps = len(self.train_loader)
+        print("train_steps: ",train_steps)
+        print("test_steps: ",len(self.vali_loader))
+        
+        # 初始化 早停止
+        early_stopping = EarlyStopping(patience=self.args.early_stop_patience, 
+                                       verbose=True)
+        # 初始化 学习率
+        learning_rate_adapter = adjust_learning_rate_class(self.args,
+                                                           True)
+        # 选择优化器
+        model_optim = self._select_optimizer()
+        
+        # 选择优化的loss function
+        # 建立一个复杂的loss
+        loss_criterion = HTSLoss(enc_pred_loss          = self.args.enc_pred_loss, 
+                                 seq_length             = self.args.sequence_length,
+                                 weight_type            = self.args.weight_type,
+                                 sigma_faktor           = self.args.sigma_faktor,
+                                 anteil                 = self.args.anteil,
+                                 smooth_loss            = self.args.smooth_loss,
+                                 device                 = self.device)
+        
+        print("start training")
+        for epoch in range(self.args.train_epochs):    
+            start_time = time()		
+            
+            iter_count = 0
+            train_loss = []
+            
+            self.model.train()
+            for i, (batch_x,batch_y) in enumerate(self.train_loader):
+                iter_count += 1
+                model_optim.zero_grad()
+                
+                batch_x = batch_x.double().to(self.device)
+                batch_y = batch_y.double().to(self.device)
+
+                # model prediction
+                if self.args.output_attention:
+                    outputs = self.model(batch_x)[0]
+                else:
+                    outputs = self.model(batch_x)
+                # ----------------------------
+                #loss = criterion(outputs, batch_y) # loss function class!!!!!!
+                loss = loss_criterion(outputs, batch_y)
+                train_loss.append(loss.item())
+    
+                loss.backward()
+                model_optim.step()
+                # ----------------------------
+				
+				
+            end_time = time()	
+            epoch_time = end_time - start_time
+            train_loss = np.average(train_loss) # 这个整个epoch中的平均loss
+            
+            #vali_loss  = self.validation(self.vali_loader, criterion)
+            vali_loss  = self.validation(self.vali_loader, loss_criterion)
+
+            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f}. it takse {4:.7f} seconds".format(
+                epoch + 1, train_steps, train_loss, vali_loss, epoch_time))
+
+
+            # average_enc_loss,  average_enc_overall_loss = self.test(self.test_loader)
+            # print("test performace of ", vali_loss, " is  enc: ", average_enc_loss, "  enc overall : " ,average_enc_overall_loss)
+            
+            # 在每个epoch 结束的时候 进行查看需要停止和调整学习率
+            early_stopping(vali_loss, self.model, path)
+            if early_stopping.early_stop:
+                print("Early stopping")
+                break
+
+
+            learning_rate_adapter(model_optim,vali_loss)
+
+        average_enc_loss,  average_enc_overall_loss = self.test(self.test_loader)
+        print("test performace of ", vali_loss, " is  enc: ", average_enc_loss, "  enc overall : " ,average_enc_overall_loss)
+        
+        last_model_path = path+'/'+'last_checkpoint.pth'
+        torch.save(self.model.state_dict(), last_model_path)
+        
+
+    def validation(self, vali_loader, criterion):
+        self.model.eval()
+        total_loss = []
+        preds = []
+        trues = []
+        for i, (batch_x,batch_y) in enumerate(vali_loader):
+            batch_x = batch_x.double().to(self.device)
+            batch_y = batch_y.double().to(self.device)
+            
+            # prediction
+            if self.args.output_attention:
+                outputs = self.model(batch_x)[0]
+            else:
+                outputs = self.model(batch_x)
+
+            pred = [j.detach() for j in outputs] #outputs.detach()#.cpu()
+            true = batch_y.detach()#.cpu()
+            #print("pred.shape ",pred.shape)
+            #print("true.shape ",true.shape)
+            loss = criterion(pred, true) 
+
+            total_loss.append(loss.item())
+          
+        average_vali_loss = np.average(total_loss)
+
+
+        self.model.train()
+        return average_vali_loss
+
+    def test(self, test_loader):
+        self.model.eval()
+
+        prediction = []
+        enc_pred  = []
+        gt = []
+        for i, (batch_x,batch_y) in enumerate(test_loader):
+            batch_x = batch_x.double().to(self.device)
+            batch_y = batch_y.double().to(self.device)
+
+            if self.args.output_attention:
+                outputs = self.model(batch_x)[0]
+            else:
+                outputs = self.model(batch_x)
+
+            batch_y = batch_y.detach().cpu().numpy()
+            enc   = outputs[0].detach().cpu().numpy()
+            if self.args.d_layers > 0 :
+                final = outputs[1].detach().cpu().numpy()
+                prediction.append(final)			
+            gt.append(batch_y)
+            enc_pred.append(enc)
+
+        gt = np.concatenate(gt).reshape(-1,self.args.sequence_length)
+        enc_pred = np.concatenate(enc_pred).reshape(-1,self.args.sequence_length)
+        average_enc_loss = np.sqrt(mean_squared_error(enc_pred[:,-1],gt[:,-1]))
+        average_enc_overall_loss = np.sqrt(mean_squared_error(enc_pred,gt))
+        self.model.train()
+        if self.args.d_layers > 0 :
+            prediction = np.concatenate(prediction).reshape(-1,self.args.sequence_length)
+            average_final_loss = np.sqrt(mean_squared_error(prediction[:,-1],gt[:,-1]))
+            average_final_overall_loss = np.sqrt(mean_squared_error(prediction,gt))
+            return average_final_loss,  average_final_overall_loss,  average_enc_loss,  average_enc_overall_loss
+        else:
+            return average_enc_loss, average_enc_overall_loss
