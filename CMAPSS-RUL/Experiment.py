@@ -380,9 +380,7 @@ class Exp_TStransformer(object):
 
             batch_y = batch_y.detach().cpu().numpy()
             enc   = outputs[0].detach().cpu().numpy()
-            if self.args.d_layers > 0 :
-                final = outputs[1].detach().cpu().numpy()
-                prediction.append(final)			
+			
             gt.append(batch_y)
             enc_pred.append(enc)
 
@@ -391,10 +389,5 @@ class Exp_TStransformer(object):
         average_enc_loss = np.sqrt(mean_squared_error(enc_pred[:,-1],gt[:,-1]))
         average_enc_overall_loss = np.sqrt(mean_squared_error(enc_pred,gt))
         self.model.train()
-        if self.args.d_layers > 0 :
-            prediction = np.concatenate(prediction).reshape(-1,self.args.sequence_length)
-            average_final_loss = np.sqrt(mean_squared_error(prediction[:,-1],gt[:,-1]))
-            average_final_overall_loss = np.sqrt(mean_squared_error(prediction,gt))
-            return average_final_loss,  average_final_overall_loss,  average_enc_loss,  average_enc_overall_loss
-        else:
-            return average_enc_loss, average_enc_overall_loss
+
+        return average_enc_loss, average_enc_overall_loss
