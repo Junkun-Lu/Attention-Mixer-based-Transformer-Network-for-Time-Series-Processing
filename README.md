@@ -13,8 +13,8 @@ Master Thesis of Junkun Lu
 在本论文中, 我们分别从分类(人类动作识别任务)与回归(剩余寿命预测任务)两个方面分别对搭建的优化模型进行验证.
   1.针对于分类任务, 我们采用了UCI-HAR数据集; 
   2.针对于回归任务, 我们采用了CMAPSS数据集, 在数据的处理过程中,以120为拐点对数据进行处理. 将120之前的数据定义为稳定运行过程,120之后的数据定义为衰退过程.
-  ![Image text](https://github.com/Junkun-Lu/Attention-Mixer-based-Transformer-Network-for-Time-Series-Processing/blob/main/picture/%E6%A8%A1%E5%9E%8B.png](https://github.com/Junkun-Lu/Attention-Mixer-based-Transformer-Network-for-Time-Series-Processing/blob/main/picture/CMAPSS%E5%A4%84%E7%90%86.png)
-
+  ![Image text](https://github.com/Junkun-Lu/Attention-Mixer-based-Transformer-Network-for-Time-Series-Processing/blob/main/picture/CMAPSS%E5%A4%84%E7%90%86.png)
+  
 ## 三. 实验结果
 在本论文中, 我们分别针对两个数据集进行消融实验, 验证了融合型自注意力机制的优越性以及在预测过程过平滑正则化项的有效性.
   
