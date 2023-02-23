@@ -2,6 +2,7 @@
 Master Thesis of Junkun Lu 
 
 ## 一. 模型介绍
+![Image text](https://github.com/Junkun-Lu/Attention-Mixer-based-Transformer-Network-for-Time-Series-Processing/blob/main/picture/%E6%A8%A1%E5%9E%8B.png)
 在本论文中, 我们搭建了一个基于混合注意力机制的Transformer优化模型, 该模型主要由三部分组成:
   1. 基于Inception Module的原理使用Local-Attention, LogSparse-Attention以及ProbSparse-Attention的融合多头注意力机制代替Transformer原有的多头注意力机制;
   2. 搭建一个组合型预测器实现从不同维度学习表征并降低维度;
